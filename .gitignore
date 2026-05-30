@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+server/node_modules/
+
+# build output
+dist/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# stale tsc emit alongside sources (Vite transpiles .ts/.tsx directly)
+src/**/*.js
+
+# logs / env
+*.log
+.env
+.env.local
+
+# local platform config (use platforms.example.json as template)
+server/config/platforms.json

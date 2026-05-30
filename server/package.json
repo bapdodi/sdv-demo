@@ -1,0 +1,15 @@
+{
+  "name": "sdv-demo-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SDV Demo — Node.js WebSocket 서버 (C++ SdvPlatform 대체)",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}
