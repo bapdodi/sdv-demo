@@ -5,8 +5,12 @@
  * platforms.json / 포트 배정 없이 차량이 자동 인식된다.
  * 내부에서 Map<vin, ws>로 이벤트 라우팅 (이벤트 버스 패턴).
  */
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
+import { readFileSync, existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VEHICLE_PORT = parseInt(process.env.VEHICLE_WS_PORT || '9003');
 const CONTROL_TTL_MS = 600;
 
@@ -96,6 +100,9 @@ export function startBridge(onVehicleUpdate) {
         } else if (msg.type === 'location' && msg.data) {
           const d = parseData(msg.data);
           if (!d || d.x == null) { /* 텍스트 location 무시 */ return; }
+          // (0,0)이 기본값으로 흘러들어오는 경우(VehicleControlFeature가 x/y 없는 명령 수신 시)
+          // 이미 이동한 차량의 위치를 덮어쓰지 않도록 순간이동 방어.
+          if (d.x === 0 && d.y === 0 && (vehicle.x !== 0 || vehicle.y !== 0)) return;
           const prevX = vehicle.x, prevY = vehicle.y;
           vehicle.x = d.x ?? vehicle.x;
           vehicle.y = d.y ?? vehicle.y;
@@ -170,6 +177,93 @@ export function releaseExternalControl(vin) {
     v.ws.send(JSON.stringify({ type: 'control_release' }));
   }
   return true;
+}
+
+/* ── 아웃바운드 연결 (DisplayFeature_v2 WS → 브릿지 클라이언트) ───── */
+// platforms.json 에 등록된 플랫폼의 DisplayFeature WS 에 브릿지가 직접 연결.
+// vehicle_state 메시지에 x,y,angle 이 포함된 경우 위치도 함께 갱신.
+function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
+  function tryConnect() {
+    const ws = new WebSocket(`ws://${host}:${port}`);
+
+    ws.on('open', () => {
+      console.log(`[bridge] ${vin} DisplayFeature 연결 (${host}:${port})`);
+      if (!vehicles.has(vin)) {
+        vehicles.set(vin, {
+          vin, name: name || vin, color: color || nextColor(),
+          x: 0, y: 0, speed: 0, steer: 0, accel: 0, brake: 0, angle: 0,
+          connected: true, lastSeen: Date.now(), isExternal: true,
+          ws: null, controlledUntil: 0,
+        });
+      } else {
+        vehicles.get(vin).connected = true;
+        vehicles.get(vin).lastSeen = Date.now();
+      }
+    });
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        const vehicle = vehicles.get(vin);
+        if (!vehicle) return;
+        vehicle.lastSeen = Date.now();
+
+        if (msg.type === 'vehicle_state' && msg.data) {
+          const d = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+          vehicle.speed  = d.speed  ?? vehicle.speed;
+          vehicle.accel  = d.accel  ?? 0;
+          vehicle.brake  = d.brake  ?? 0;
+          vehicle.steer  = d.steer  ?? 0;
+          // d.x가 명시적으로 포함된 경우에만 위치 갱신.
+          // (0,0)이 기본값으로 흘러들어와 NavigationFeature 위치를 덮어쓰는 문제 방지:
+          // 이미 이동한 차량에 (0,0)이 오면 순간이동으로 간주해 무시.
+          if (d.x != null && !(d.x === 0 && d.y === 0 && (vehicle.x !== 0 || vehicle.y !== 0))) {
+            const prevX = vehicle.x, prevY = vehicle.y;
+            vehicle.x = d.x;
+            vehicle.y = d.y ?? vehicle.y;
+            if (d.angle != null) {
+              vehicle.angle = d.angle;
+            } else {
+              const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
+              if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
+            }
+          }
+        } else if (msg.type === 'location' && msg.data) {
+          const d = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+          if (d && d.x != null && !(d.x === 0 && d.y === 0 && (vehicle.x !== 0 || vehicle.y !== 0))) {
+            const prevX = vehicle.x, prevY = vehicle.y;
+            vehicle.x = d.x; vehicle.y = d.y ?? vehicle.y;
+            if (d.angle != null) vehicle.angle = d.angle;
+            else {
+              const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
+              if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
+            }
+          }
+        }
+      } catch { /* ignore */ }
+    });
+
+    ws.on('close', () => {
+      if (vehicles.has(vin)) vehicles.get(vin).connected = false;
+      console.log(`[bridge] ${vin} DisplayFeature 끊김 — 5s 후 재시도`);
+      setTimeout(tryConnect, 5000);
+    });
+
+    ws.on('error', () => ws.close());
+  }
+  tryConnect();
+}
+
+export function connectPlatforms() {
+  const cfgPath = path.resolve(__dirname, '..', 'config', 'platforms.json');
+  if (!existsSync(cfgPath)) return;
+  try {
+    const platforms = JSON.parse(readFileSync(cfgPath, 'utf8'));
+    for (const p of platforms) connectPlatformDisplayFeature(p);
+    console.log(`[bridge] platforms.json 에서 ${platforms.length}개 플랫폼 아웃바운드 연결 시작`);
+  } catch (e) {
+    console.error('[bridge] platforms.json 로드 실패:', e.message);
+  }
 }
 
 /* ── 정리 ──────────────────────────────────────────────── */

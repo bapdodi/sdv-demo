@@ -4,7 +4,7 @@ import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-  startBridge, getExternalSnapshot, applyControl, releaseExternalControl,
+  startBridge, connectPlatforms, getExternalSnapshot, applyControl, releaseExternalControl,
 } from './platform-bridge.js';
 import { nearestEdge } from './road-utils.js';
 
@@ -33,6 +33,7 @@ app.get('*', (_req, res) => {
 
 /* ── 차량 허브 브리지 (단일 포트, 자동 등록) ────────────────────────── */
 startBridge();
+connectPlatforms();
 
 /* ── WebSocket 9102 — vehicle-display ────────────────────────────────── */
 const wssDisplay = new WebSocketServer({ port: 9102 });
