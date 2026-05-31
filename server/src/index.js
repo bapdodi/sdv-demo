@@ -31,8 +31,8 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(DIST_DIR, 'index.html'));
 });
 
-/* ── 외부 플랫폼 브리지 ──────────────────────────────────────────────── */
-const bridgeVins = startBridge();
+/* ── 차량 허브 브리지 (단일 포트, 자동 등록) ────────────────────────── */
+startBridge();
 
 /* ── WebSocket 9102 — vehicle-display ────────────────────────────────── */
 const wssDisplay = new WebSocketServer({ port: 9102 });
@@ -80,16 +80,17 @@ function broadcastDisplay(msg) {
   }
 }
 
+// 스냅샷 객체는 매 틱 새로 만들어 바로 직렬화 후 버려지므로 제자리(in-place)에서
+// road 필드를 채운다 — 차량당 한 번씩 일어나던 객체 스프레드 재할당을 제거.
 function addRoadInfo(v) {
   const edge = nearestEdge(v.x, v.y);
-  return {
-    ...v,
-    road: edge ? { name: edge.name, type: edge.type, speed_limit: edge.speed_limit } : null,
-  };
+  v.road = edge ? { name: edge.name, type: edge.type, speed_limit: edge.speed_limit } : null;
+  return v;
 }
 
 function sendFleetState() {
-  const external = getExternalSnapshot().map(addRoadInfo);
+  const external = getExternalSnapshot();
+  for (const v of external) addRoadInfo(v);
   broadcastDisplay({ type: 'fleet', data: external });
 }
 
@@ -103,13 +104,9 @@ const PORT = process.env.PORT || 3030;
 server.listen(PORT, () => {
   console.log(`\n  SDV Demo Server running`);
   console.log(`  ────────────────────────`);
-  if (bridgeVins.length) {
-    console.log(`  Connected platforms: ${bridgeVins.join(', ')}`);
-  } else {
-    console.log(`  ⚠ No platforms configured`);
-    console.log(`    1. Copy config/platforms.example.json → platforms.json`);
-    console.log(`    2. Or set PLATFORM_BRIDGE env var`);
-  }
+  console.log(`  WebSocket 9003  → 차량 허브 (자동 등록)`);
   console.log(`  WebSocket 9102  → fleet state broadcast`);
-  console.log(`  HTTP    ${PORT}   → React App\n`);
+  console.log(`  HTTP    ${PORT}   → React App`);
+  console.log(`\n  시뮬레이터:  node simulator.js`);
+  console.log(`  차량 추가:   config/vehicles.json 편집 후 재시작\n`);
 });

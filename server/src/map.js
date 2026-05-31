@@ -33,6 +33,10 @@ export const MAP = {
   ]
 };
 
+// id → node 사전 인덱스. node(id) 가 매 호출마다 선형 탐색하지 않도록
+// 모듈 로드 시 1회 Map 으로 구성한다 (nearestEdge 등 핫패스에서 반복 호출됨).
+const NODE_BY_ID = new Map(MAP.nodes.map(n => [n.id, n]));
+
 export function node(id) {
-  return MAP.nodes.find(n => n.id === id);
+  return NODE_BY_ID.get(id);
 }

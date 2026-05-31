@@ -1,0 +1,5 @@
+[
+  { "vin": "SDV-SIM-001", "name": "테헤란로 차량", "color": "#ff6b6b" },
+  { "vin": "SDV-SIM-002", "name": "판교 차량",     "color": "#ffd93d" },
+  { "vin": "SDV-SIM-003", "name": "동탄 차량",     "color": "#6bcbff" }
+]

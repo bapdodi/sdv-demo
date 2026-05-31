@@ -1,107 +1,83 @@
-import { WebSocket } from 'ws';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = path.resolve(__dirname, '..', 'config', 'platforms.json');
-
-/* ── 외부 플랫폼 상태 ──────────────────────────────────── */
-// vin -> { vin, name, color, x, y, speed, steer, accel, brake, angle, connected, host, ws, controlledUntil }
-const externalVehicles = new Map();
-
 /**
- * "제어 중" 표시(controlled 플래그) 유지 시간(ms).
- * 클라이언트가 SERVER_INTERVAL_MS(200ms)마다 control 을 보내므로,
- * 그보다 넉넉히 길게 잡아 패킷 한두 개가 누락돼도 깜빡이지 않게 한다.
- * 이 시간 동안 control 갱신이 없으면 순수 자율주행 상태로 표시된다.
+ * 차량 허브 브릿지 — 단일 WebSocket 서버(VEHICLE_PORT)
+ *
+ * 차량(시뮬레이터 또는 실제 플랫폼)이 접속하면 스스로 VIN을 등록한다.
+ * platforms.json / 포트 배정 없이 차량이 자동 인식된다.
+ * 내부에서 Map<vin, ws>로 이벤트 라우팅 (이벤트 버스 패턴).
  */
+import { WebSocketServer } from 'ws';
+
+const VEHICLE_PORT = parseInt(process.env.VEHICLE_WS_PORT || '9003');
 const CONTROL_TTL_MS = 600;
 
-/* ── 설정 로드 ─────────────────────────────────────────── */
-function loadConfig() {
-  // 1. JSON config file 우선
-  try {
-    if (fs.existsSync(CONFIG_PATH)) {
-      const data = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-      if (Array.isArray(data) && data.length) {
-        console.log(`[bridge] loaded ${data.length} platforms from config`);
-        return data;
-      }
-    }
-  } catch (e) {
-    console.warn(`[bridge] config parse error:`, e.message);
-  }
-
-  // 2. PLATFORM_BRIDGE 환경변수 ("host:port:vin:name,host:port:vin:name")
-  const env = process.env.PLATFORM_BRIDGE || '';
-  if (!env) return [];
-
-  return env.split(',').filter(Boolean).map((entry, i) => {
-    const parts = entry.split(':');
-    return {
-      vin: parts[2] || `EXT-${String(i + 1).padStart(3, '0')}`,
-      name: parts[3] || `External ${i + 1}`,
-      host: parts[0],
-      port: parseInt(parts[1]) || 9002,
-      color: ['#ff6b6b', '#ffd93d', '#6bcbff', '#c084fc', '#fb923c'][i % 5],
-    };
-  });
+const COLOR_PALETTE = [
+  '#ff6b6b', '#ffd93d', '#6bcbff', '#a29bfe', '#55efc4',
+  '#fd79a8', '#fdcb6e', '#74b9ff', '#00cec9', '#e17055',
+];
+let colorIndex = 0;
+function nextColor() {
+  return COLOR_PALETTE[colorIndex++ % COLOR_PALETTE.length];
 }
 
-/* ── 플랫폼 연결 관리 ──────────────────────────────────── */
-const connections = [];
+// vin → { vin, name, color, x, y, speed, steer, accel, brake, angle, connected, ws, controlledUntil, lastSeen, isExternal }
+const vehicles = new Map();
 
 export function startBridge(onVehicleUpdate) {
-  const platforms = loadConfig();
-  if (!platforms.length) {
-    console.log('[bridge] no platforms configured');
-    return [];
-  }
+  const wss = new WebSocketServer({ port: VEHICLE_PORT });
 
-  for (const p of platforms) {
-    connectToPlatform(p, onVehicleUpdate);
-  }
+  wss.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n  ✗ 포트 ${VEHICLE_PORT} 가 이미 사용 중입니다 — 이전 서버가 떠 있어요.`);
+      console.error(`    pkill -f simulator.js  또는  lsof -ti:${VEHICLE_PORT} | xargs kill\n`);
+    } else {
+      console.error('[bridge] 오류:', err.message);
+    }
+    process.exit(1);
+  });
 
-  return platforms.map(p => p.vin);
-}
-
-function connectToPlatform(p, onUpdate) {
-  const url = `ws://${p.host}:${p.port}`;
-
-  // 초기 상태 등록
-  const vehicle = {
-    vin: p.vin,
-    name: p.name,
-    color: p.color,
-    x: 0, y: 0,
-    speed: 0, steer: 0, accel: 0, brake: 0,
-    angle: 0,
-    connected: false,
-    host: p.host,
-    lastSeen: 0,
-    isExternal: true,
-    ws: null,            // 현재 플랫폼 연결 (control 상류 전송용)
-    controlledUntil: 0,  // 이 시각까지 수동 제어 override 유효
-  };
-  externalVehicles.set(p.vin, vehicle);
-
-  function connect() {
-    const ws = new WebSocket(url);
-    vehicle.ws = ws;
-
-    ws.on('open', () => {
-      console.log(`[bridge] ${p.vin} (${p.host}:${p.port}) connected`);
-      vehicle.connected = true;
-    });
+  wss.on('connection', (ws) => {
+    let vin = null;
 
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
+
+        // ── 차량 등록 ──────────────────────────────────────────
+        if (msg.type === 'register' && msg.vin) {
+          vin = msg.vin;
+          if (vehicles.has(vin)) {
+            // 재접속: ws 핸들만 교체
+            const v = vehicles.get(vin);
+            v.ws = ws;
+            v.connected = true;
+            v.lastSeen = Date.now();
+          } else {
+            vehicles.set(vin, {
+              vin,
+              name: vin,          // 이름 = VIN 고정
+              color: nextColor(), // 색상 = 자동 배정
+              x: 0, y: 0,
+              speed: 0, steer: 0, accel: 0, brake: 0,
+              angle: 0,
+              connected: true,
+              lastSeen: Date.now(),
+              isExternal: true,
+              ws,
+              controlledUntil: 0,
+            });
+          }
+          console.log(`[bridge] ${vin} 자동 등록`);
+          if (onVehicleUpdate) onVehicleUpdate(getExternalSnapshot());
+          return;
+        }
+
+        // 등록 전 메시지는 무시
+        if (!vin) return;
+        const vehicle = vehicles.get(vin);
+        if (!vehicle) return;
         vehicle.lastSeen = Date.now();
 
-        // 제어 중에도 위치는 플랫폼(자율주행 + 입력 오버레이)이 계산하므로
-        // 들어오는 포즈/상태를 그대로 반영한다. (override 하지 않음)
+        // ── 상태/위치 업데이트 ─────────────────────────────────
         if (msg.type === 'vehicle_state' && msg.data) {
           vehicle.speed = msg.data.speed ?? vehicle.speed;
           vehicle.accel = msg.data.accel ?? 0;
@@ -117,76 +93,66 @@ function connectToPlatform(p, onUpdate) {
             const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
             if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
           }
-        } else if (msg.type === 'road_info' && msg.data) {
-          if (msg.data.position) {
-            const prevX = vehicle.x, prevY = vehicle.y;
-            vehicle.x = msg.data.position.x ?? vehicle.x;
-            vehicle.y = msg.data.position.y ?? vehicle.y;
-            if (msg.data.position.angle != null) {
-              vehicle.angle = msg.data.position.angle;
-            } else {
-              const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
-              if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
-            }
+        } else if (msg.type === 'road_info' && msg.data?.position) {
+          const prevX = vehicle.x, prevY = vehicle.y;
+          vehicle.x = msg.data.position.x ?? vehicle.x;
+          vehicle.y = msg.data.position.y ?? vehicle.y;
+          if (msg.data.position.angle != null) {
+            vehicle.angle = msg.data.position.angle;
+          } else {
+            const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
+            if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
           }
         }
 
-        // 상태 업데이트 콜백
-        if (onUpdate) onUpdate(getExternalSnapshot());
-      } catch { /* ignore */ }
+        if (onVehicleUpdate) onVehicleUpdate(getExternalSnapshot());
+      } catch { /* ignore malformed */ }
     });
 
     ws.on('close', () => {
-      console.log(`[bridge] ${p.vin} disconnected, retry 5s...`);
-      vehicle.connected = false;
-      setTimeout(connect, 5000);
+      if (vin && vehicles.has(vin)) {
+        vehicles.get(vin).connected = false;
+        console.log(`[bridge] ${vin} 연결 끊김`);
+        if (onVehicleUpdate) onVehicleUpdate(getExternalSnapshot());
+      }
     });
 
     ws.on('error', () => ws.close());
+  });
 
-    connections.push(ws);
-  }
-
-  connect();
+  console.log(`[bridge] 차량 허브 대기 중 (포트 ${VEHICLE_PORT})`);
+  return wss;
 }
 
 /* ── 스냅샷 ────────────────────────────────────────────── */
 export function getExternalSnapshot() {
   const result = [];
-  for (const v of externalVehicles.values()) {
-    if (v.lastSeen === 0) continue;  // 아직 데이터 없음
+  const now = Date.now();
+  for (const v of vehicles.values()) {
+    if (v.lastSeen === 0) continue;
     result.push({
-      vin: v.vin,
-      name: v.name,
-      color: v.color,
-      x: Math.round(v.x * 10) / 10,
-      y: Math.round(v.y * 10) / 10,
-      speed: v.speed,
-      steer: v.steer,
-      accel: v.accel,
-      brake: v.brake,
-      angle: v.angle,
+      vin:       v.vin,
+      name:      v.name,
+      color:     v.color,
+      x:         Math.round(v.x * 10) / 10,
+      y:         Math.round(v.y * 10) / 10,
+      speed:     v.speed,
+      steer:     v.steer,
+      accel:     v.accel,
+      brake:     v.brake,
+      angle:     v.angle,
       connected: v.connected,
-      controlled: Date.now() < v.controlledUntil,
+      controlled: now < v.controlledUntil,
       isExternal: true,
-      // road는 생략 (클라이언트에서 MAP 기반 계산)
     });
   }
   return result;
 }
 
-/* ── 수동 제어 (상류) ──────────────────────────────────── */
-/**
- * 클라이언트의 입력(가속/브레이크/조향)을 플랫폼으로 전달한다.
- * 위치는 플랫폼이 자율주행 위에 입력을 얹어 계산하므로 여기서 포즈를 덮지 않는다.
- * controlledUntil 은 UI 의 제어중 표시(controlled 플래그) 용도로만 유지한다.
- * @param {{accel?:number, brake?:number, steer?:number}} data 제어 입력
- * @returns {boolean} 대상 차량이 존재하면 true
- */
+/* ── 수동 제어 라우팅 ───────────────────────────────────── */
 export function applyControl(vin, data) {
-  const v = externalVehicles.get(vin);
+  const v = vehicles.get(vin);
   if (!v) return false;
-
   v.controlledUntil = Date.now() + CONTROL_TTL_MS;
   if (v.ws && v.ws.readyState === 1) {
     v.ws.send(JSON.stringify({ type: 'control', data }));
@@ -194,9 +160,8 @@ export function applyControl(vin, data) {
   return true;
 }
 
-/** 수동 제어 해제 — override 를 즉시 끄고 플랫폼에 자율주행 복귀를 알린다. */
 export function releaseExternalControl(vin) {
-  const v = externalVehicles.get(vin);
+  const v = vehicles.get(vin);
   if (!v) return false;
   v.controlledUntil = 0;
   if (v.ws && v.ws.readyState === 1) {
@@ -207,9 +172,5 @@ export function releaseExternalControl(vin) {
 
 /* ── 정리 ──────────────────────────────────────────────── */
 export function stopBridge() {
-  for (const ws of connections) {
-    try { ws.close(); } catch { /* ignore */ }
-  }
-  connections.length = 0;
-  externalVehicles.clear();
+  vehicles.clear();
 }
