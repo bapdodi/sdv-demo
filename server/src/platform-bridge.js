@@ -78,30 +78,39 @@ export function startBridge(onVehicleUpdate) {
         vehicle.lastSeen = Date.now();
 
         // ── 상태/위치 업데이트 ─────────────────────────────────
+        // C++ DisplayFeature 는 data 를 JSON 문자열로 전송하므로 양쪽 포맷을 모두 처리.
+        const parseData = (d) => (typeof d === 'string' ? JSON.parse(d) : d);
+
         if (msg.type === 'vehicle_state' && msg.data) {
-          vehicle.speed = msg.data.speed ?? vehicle.speed;
-          vehicle.accel = msg.data.accel ?? 0;
-          vehicle.brake = msg.data.brake ?? 0;
-          vehicle.steer = msg.data.steer ?? 0;
+          const d = parseData(msg.data);
+          vehicle.speed = d.speed ?? vehicle.speed;
+          vehicle.accel = d.accel ?? 0;
+          vehicle.brake = d.brake ?? 0;
+          vehicle.steer = d.steer ?? 0;
         } else if (msg.type === 'location' && msg.data) {
+          const d = parseData(msg.data);
           const prevX = vehicle.x, prevY = vehicle.y;
-          vehicle.x = msg.data.x ?? vehicle.x;
-          vehicle.y = msg.data.y ?? vehicle.y;
-          if (msg.data.angle != null) {
-            vehicle.angle = msg.data.angle;
+          vehicle.x = d.x ?? vehicle.x;
+          vehicle.y = d.y ?? vehicle.y;
+          if (d.angle != null) {
+            vehicle.angle = d.angle;
           } else {
             const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
             if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
           }
-        } else if (msg.type === 'road_info' && msg.data?.position) {
-          const prevX = vehicle.x, prevY = vehicle.y;
-          vehicle.x = msg.data.position.x ?? vehicle.x;
-          vehicle.y = msg.data.position.y ?? vehicle.y;
-          if (msg.data.position.angle != null) {
-            vehicle.angle = msg.data.position.angle;
-          } else {
-            const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
-            if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
+        } else if (msg.type === 'road_info' && msg.data) {
+          const d = parseData(msg.data);
+          const pos = d.position ?? d;
+          if (pos.x != null) {
+            const prevX = vehicle.x, prevY = vehicle.y;
+            vehicle.x = pos.x;
+            vehicle.y = pos.y ?? vehicle.y;
+            if (pos.angle != null) {
+              vehicle.angle = pos.angle;
+            } else {
+              const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
+              if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
+            }
           }
         }
 
