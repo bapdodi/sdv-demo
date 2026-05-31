@@ -79,16 +79,23 @@ export function startBridge(onVehicleUpdate) {
 
         // ── 상태/위치 업데이트 ─────────────────────────────────
         // C++ DisplayFeature 는 data 를 JSON 문자열로 전송하므로 양쪽 포맷을 모두 처리.
-        const parseData = (d) => (typeof d === 'string' ? JSON.parse(d) : d);
+        // JSON 파싱 실패 = NavigationFeature 텍스트("서울 강남구...") → 조용히 무시.
+        const parseData = (d) => {
+          try { return typeof d === 'string' ? JSON.parse(d) : d; } catch { return null; }
+        };
 
         if (msg.type === 'vehicle_state' && msg.data) {
           const d = parseData(msg.data);
-          vehicle.speed = d.speed ?? vehicle.speed;
-          vehicle.accel = d.accel ?? 0;
-          vehicle.brake = d.brake ?? 0;
-          vehicle.steer = d.steer ?? 0;
+          if (!d) { /* NavigationFeature 텍스트 무시 */ }
+          else {
+            vehicle.speed = d.speed ?? vehicle.speed;
+            vehicle.accel = d.accel ?? 0;
+            vehicle.brake = d.brake ?? 0;
+            vehicle.steer = d.steer ?? 0;
+          }
         } else if (msg.type === 'location' && msg.data) {
           const d = parseData(msg.data);
+          if (!d || d.x == null) { /* 텍스트 location 무시 */ return; }
           const prevX = vehicle.x, prevY = vehicle.y;
           vehicle.x = d.x ?? vehicle.x;
           vehicle.y = d.y ?? vehicle.y;
@@ -97,20 +104,6 @@ export function startBridge(onVehicleUpdate) {
           } else {
             const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
             if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
-          }
-        } else if (msg.type === 'road_info' && msg.data) {
-          const d = parseData(msg.data);
-          const pos = d.position ?? d;
-          if (pos.x != null) {
-            const prevX = vehicle.x, prevY = vehicle.y;
-            vehicle.x = pos.x;
-            vehicle.y = pos.y ?? vehicle.y;
-            if (pos.angle != null) {
-              vehicle.angle = pos.angle;
-            } else {
-              const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
-              if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
-            }
           }
         }
 
