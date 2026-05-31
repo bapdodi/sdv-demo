@@ -2,7 +2,7 @@
   "name": "sdv-demo-server",
   "version": "1.0.0",
   "private": true,
-  "description": "SDV Demo — Node.js WebSocket 서버 (C++ SdvPlatform 대체)",
+  "description": "SDV Demo — Node.js WebSocket 서버 (C++ SdvPlatform 연동)",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",

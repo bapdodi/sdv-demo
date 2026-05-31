@@ -1,8 +1,8 @@
 /**
  * 차량 허브 브릿지 — 단일 WebSocket 서버(VEHICLE_PORT)
  *
- * 차량(시뮬레이터 또는 실제 플랫폼)이 접속하면 스스로 VIN을 등록한다.
- * platforms.json / 포트 배정 없이 차량이 자동 인식된다.
+ * C++ 플랫폼이 접속하면 스스로 VIN을 등록한다.
+ * platforms.json 에 등록된 외부 차량은 DisplayFeature WS 로 직접 연결한다.
  * 내부에서 Map<vin, ws>로 이벤트 라우팅 (이벤트 버스 패턴).
  */
 import { WebSocketServer, WebSocket } from 'ws';
@@ -12,7 +12,20 @@ import path from 'path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VEHICLE_PORT = parseInt(process.env.VEHICLE_WS_PORT || '9003');
-const CONTROL_TTL_MS = 600;
+
+const MAP_W = 750, MAP_H = 465;
+/** 맵 범위를 크게 벗어났거나 현재 위치에서 비현실적으로 먼 좌표는 C++ 초기값/노이즈로 판단해 무시 */
+function isValidPosition(nx, ny, curX, curY) {
+  const MARGIN = 80;
+  if (nx < -MARGIN || nx > MAP_W + MARGIN || ny < -MARGIN || ny > MAP_H + MARGIN) return false;
+  // 차량이 이미 이동한 상태라면 최대 이동 거리(MAX_JUMP) 이내인지 확인
+  if (curX !== 0 || curY !== 0) {
+    const MAX_JUMP_SQ = 250 * 250; // ~250 유닛: 고속 주행 1초 한계치
+    const dx = nx - curX, dy = ny - curY;
+    if (dx * dx + dy * dy > MAX_JUMP_SQ) return false;
+  }
+  return true;
+}
 
 const COLOR_PALETTE = [
   '#ff6b6b', '#ffd93d', '#6bcbff', '#a29bfe', '#55efc4',
@@ -23,7 +36,7 @@ function nextColor() {
   return COLOR_PALETTE[colorIndex++ % COLOR_PALETTE.length];
 }
 
-// vin → { vin, name, color, x, y, speed, steer, accel, brake, angle, connected, ws, controlledUntil, lastSeen, isExternal }
+// vin → { vin, name, color, x, y, speed, steer, accel, brake, angle, connected, ws, lastSeen, isExternal }
 const vehicles = new Map();
 
 export function startBridge(onVehicleUpdate) {
@@ -32,7 +45,7 @@ export function startBridge(onVehicleUpdate) {
   wss.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
       console.error(`\n  ✗ 포트 ${VEHICLE_PORT} 가 이미 사용 중입니다 — 이전 서버가 떠 있어요.`);
-      console.error(`    pkill -f simulator.js  또는  lsof -ti:${VEHICLE_PORT} | xargs kill\n`);
+      console.error(`    이전 프로세스를 종료한 뒤 다시 시작하세요: lsof -ti:${VEHICLE_PORT} | xargs kill\n`);
     } else {
       console.error('[bridge] 오류:', err.message);
     }
@@ -50,24 +63,27 @@ export function startBridge(onVehicleUpdate) {
         if (msg.type === 'register' && msg.vin) {
           vin = msg.vin;
           if (vehicles.has(vin)) {
-            // 재접속: ws 핸들만 교체
+            // 재접속: ws 교체 + 위치 상태 리셋 (이전 위치가 남아 있으면 새 위치가 MAX_JUMP로 차단됨)
             const v = vehicles.get(vin);
             v.ws = ws;
             v.connected = true;
             v.lastSeen = Date.now();
+            v.x = 0; v.y = 0;
+            v.hasPosition = false;
+            v.displayPos = undefined;
           } else {
             vehicles.set(vin, {
               vin,
               name: vin,          // 이름 = VIN 고정
               color: nextColor(), // 색상 = 자동 배정
               x: 0, y: 0,
+              hasPosition: false, // 첫 location 수신 전까지 스냅샷에서 제외
               speed: 0, steer: 0, accel: 0, brake: 0,
               angle: 0,
               connected: true,
               lastSeen: Date.now(),
               isExternal: true,
               ws,
-              controlledUntil: 0,
             });
           }
           console.log(`[bridge] ${vin} 자동 등록`);
@@ -100,12 +116,18 @@ export function startBridge(onVehicleUpdate) {
         } else if (msg.type === 'location' && msg.data) {
           const d = parseData(msg.data);
           if (!d || d.x == null) { /* 텍스트 location 무시 */ return; }
-          // (0,0)이 기본값으로 흘러들어오는 경우(VehicleControlFeature가 x/y 없는 명령 수신 시)
-          // 이미 이동한 차량의 위치를 덮어쓰지 않도록 순간이동 방어.
-          if (d.x === 0 && d.y === 0 && (vehicle.x !== 0 || vehicle.y !== 0)) return;
+          if (!isValidPosition(d.x, d.y, vehicle.x, vehicle.y)) return;
+          // DisplayFeature 자체 고정 위치(angle 명시 + speed=0)를 NavigationFeature 실제 위치와 분리.
+          // 첫 수신 시 기준점으로 기록하고, 이후 동일 좌표는 무시해 두 소스가 번갈아 튀는 현상 방지.
+          if (d.angle != null && (d.speed === 0 || d.speed == null)) {
+            if (!vehicle.displayPos) vehicle.displayPos = { x: d.x, y: d.y };
+            if (vehicle.hasPosition && d.x === vehicle.displayPos.x && d.y === vehicle.displayPos.y) return;
+          }
           const prevX = vehicle.x, prevY = vehicle.y;
-          vehicle.x = d.x ?? vehicle.x;
+          vehicle.x = d.x;
           vehicle.y = d.y ?? vehicle.y;
+          vehicle.hasPosition = true;
+          if (d.speed != null) vehicle.speed = d.speed; // NavigationFeature 가 location 에 speed 포함
           if (d.angle != null) {
             vehicle.angle = d.angle;
           } else {
@@ -136,9 +158,9 @@ export function startBridge(onVehicleUpdate) {
 /* ── 스냅샷 ────────────────────────────────────────────── */
 export function getExternalSnapshot() {
   const result = [];
-  const now = Date.now();
   for (const v of vehicles.values()) {
     if (v.lastSeen === 0) continue;
+    if (!v.hasPosition) continue; // 실제 위치 수신 전 (0,0) 브로드캐스트 차단
     result.push({
       vin:       v.vin,
       name:      v.name,
@@ -151,32 +173,10 @@ export function getExternalSnapshot() {
       brake:     v.brake,
       angle:     v.angle,
       connected: v.connected,
-      controlled: now < v.controlledUntil,
       isExternal: true,
     });
   }
   return result;
-}
-
-/* ── 수동 제어 라우팅 ───────────────────────────────────── */
-export function applyControl(vin, data) {
-  const v = vehicles.get(vin);
-  if (!v) return false;
-  v.controlledUntil = Date.now() + CONTROL_TTL_MS;
-  if (v.ws && v.ws.readyState === 1) {
-    v.ws.send(JSON.stringify({ type: 'control', data }));
-  }
-  return true;
-}
-
-export function releaseExternalControl(vin) {
-  const v = vehicles.get(vin);
-  if (!v) return false;
-  v.controlledUntil = 0;
-  if (v.ws && v.ws.readyState === 1) {
-    v.ws.send(JSON.stringify({ type: 'control_release' }));
-  }
-  return true;
 }
 
 /* ── 아웃바운드 연결 (DisplayFeature_v2 WS → 브릿지 클라이언트) ───── */
@@ -184,6 +184,7 @@ export function releaseExternalControl(vin) {
 // vehicle_state 메시지에 x,y,angle 이 포함된 경우 위치도 함께 갱신.
 function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
   function tryConnect() {
+    console.log(`[bridge] ${vin} DisplayFeature 접속 시도 (${host}:${port})`);
     const ws = new WebSocket(`ws://${host}:${port}`);
 
     ws.on('open', () => {
@@ -191,14 +192,19 @@ function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
       if (!vehicles.has(vin)) {
         vehicles.set(vin, {
           vin, name: name || vin, color: color || nextColor(),
-          x: 0, y: 0, speed: 0, steer: 0, accel: 0, brake: 0, angle: 0,
+          x: 0, y: 0, hasPosition: false,
+          speed: 0, steer: 0, accel: 0, brake: 0, angle: 0,
           connected: true, lastSeen: Date.now(), isExternal: true,
-          ws: null, controlledUntil: 0,
+          ws: null,
         });
       } else {
         vehicles.get(vin).connected = true;
         vehicles.get(vin).lastSeen = Date.now();
       }
+    });
+
+    ws.on('unexpected-response', (_req, res) => {
+      console.error(`[bridge] ${vin} DisplayFeature 응답 오류 (${host}:${port}) - ${res.statusCode}`);
     });
 
     ws.on('message', (raw) => {
@@ -214,13 +220,11 @@ function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
           vehicle.accel  = d.accel  ?? 0;
           vehicle.brake  = d.brake  ?? 0;
           vehicle.steer  = d.steer  ?? 0;
-          // d.x가 명시적으로 포함된 경우에만 위치 갱신.
-          // (0,0)이 기본값으로 흘러들어와 NavigationFeature 위치를 덮어쓰는 문제 방지:
-          // 이미 이동한 차량에 (0,0)이 오면 순간이동으로 간주해 무시.
-          if (d.x != null && !(d.x === 0 && d.y === 0 && (vehicle.x !== 0 || vehicle.y !== 0))) {
+          if (d.x != null && isValidPosition(d.x, d.y ?? 0, vehicle.x, vehicle.y)) {
             const prevX = vehicle.x, prevY = vehicle.y;
             vehicle.x = d.x;
             vehicle.y = d.y ?? vehicle.y;
+            vehicle.hasPosition = true;
             if (d.angle != null) {
               vehicle.angle = d.angle;
             } else {
@@ -230,9 +234,11 @@ function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
           }
         } else if (msg.type === 'location' && msg.data) {
           const d = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
-          if (d && d.x != null && !(d.x === 0 && d.y === 0 && (vehicle.x !== 0 || vehicle.y !== 0))) {
+          if (d && d.x != null && isValidPosition(d.x, d.y ?? 0, vehicle.x, vehicle.y)) {
             const prevX = vehicle.x, prevY = vehicle.y;
             vehicle.x = d.x; vehicle.y = d.y ?? vehicle.y;
+            vehicle.hasPosition = true;
+            if (d.speed != null) vehicle.speed = d.speed;
             if (d.angle != null) vehicle.angle = d.angle;
             else {
               const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
@@ -249,7 +255,10 @@ function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
       setTimeout(tryConnect, 5000);
     });
 
-    ws.on('error', () => ws.close());
+    ws.on('error', (err) => {
+      console.error(`[bridge] ${vin} DisplayFeature 연결 실패 (${host}:${port}) - ${err.message}`);
+      ws.close();
+    });
   }
   tryConnect();
 }

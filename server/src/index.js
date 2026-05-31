@@ -1,22 +1,12 @@
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import {
-  startBridge, connectPlatforms, getExternalSnapshot, applyControl, releaseExternalControl,
-} from './platform-bridge.js';
+import { startBridge, connectPlatforms, getExternalSnapshot } from './platform-bridge.js';
 import { nearestEdge } from './road-utils.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJ_DIR = path.resolve(__dirname, '..', '..');
-const CLIENT_DIR = path.resolve(PROJ_DIR, 'client');
-const DIST_DIR = path.resolve(PROJ_DIR, 'dist');
 
 /**
  * fleet 상태 브로드캐스트 주기(ms).
- * 클라이언트의 src/constants/sim.ts(SERVER_INTERVAL_MS)와 반드시 일치해야
- * Snapshot Interpolation 타이밍이 맞는다.
+ * 차량 클라이언트가 다른 차량 위치를 지도에 올릴 때 사용하는 갱신 주기.
  */
 const BROADCAST_INTERVAL_MS = 200;
 
@@ -24,11 +14,27 @@ const BROADCAST_INTERVAL_MS = 200;
 const app = express();
 const server = createServer(app);
 
-app.use(express.static(DIST_DIR));
-app.use('/control-legacy', express.static(path.join(CLIENT_DIR, 'vehicle-control')));
-app.use('/display-legacy', express.static(path.join(CLIENT_DIR, 'vehicle-display')));
-app.get('*', (_req, res) => {
-  res.sendFile(path.join(DIST_DIR, 'index.html'));
+app.get('/', (_req, res) => {
+  res.json({
+    name: 'SDV Demo Server',
+    status: 'ok',
+    ports: {
+      http: Number(process.env.PORT || 3030),
+      vehicleHub: Number(process.env.VEHICLE_WS_PORT || 9003),
+      fleetBroadcast: 9102,
+    },
+    websocket: {
+      vehicleHub: `ws://localhost:${process.env.VEHICLE_WS_PORT || 9003}`,
+      fleetBroadcast: 'ws://localhost:9102',
+    },
+  });
+});
+
+app.use((_req, res) => {
+  res.status(404).json({
+    error: 'not_found',
+    message: 'Demo server only. React frontend routes are not served here.',
+  });
 });
 
 /* ── 차량 허브 브리지 (단일 포트, 자동 등록) ────────────────────────── */
@@ -55,18 +61,6 @@ wssDisplay.on('connection', (ws) => {
   displayClients.add(ws);
   console.log('[9102] vehicle-display connected (total:', displayClients.size, ')');
   sendFleetState();
-
-  // 클라이언트 → 서버 수동 제어 명령 (상류)
-  ws.on('message', (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      if (msg.type === 'control' && msg.vin && msg.data) {
-        applyControl(msg.vin, msg.data);
-      } else if (msg.type === 'control_release' && msg.vin) {
-        releaseExternalControl(msg.vin);
-      }
-    } catch { /* ignore malformed */ }
-  });
 
   ws.on('close', () => {
     displayClients.delete(ws);
@@ -107,7 +101,6 @@ server.listen(PORT, () => {
   console.log(`  ────────────────────────`);
   console.log(`  WebSocket 9003  → 차량 허브 (자동 등록)`);
   console.log(`  WebSocket 9102  → fleet state broadcast`);
-  console.log(`  HTTP    ${PORT}   → React App`);
-  console.log(`\n  시뮬레이터:  node simulator.js`);
-  console.log(`  차량 추가:   config/vehicles.json 편집 후 재시작\n`);
+  console.log(`  HTTP    ${PORT}   → server status`);
+  console.log(`\n  C++ 플랫폼:  platforms.json 에 실제 차량 등록 후 재시작\n`);
 });
