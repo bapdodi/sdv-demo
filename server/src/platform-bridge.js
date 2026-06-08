@@ -5,10 +5,10 @@
  * platforms.json 에 등록된 외부 차량은 DisplayFeature WS 로 직접 연결한다.
  * 내부에서 Map<vin, ws>로 이벤트 라우팅 (이벤트 버스 패턴).
  */
-import { WebSocketServer, WebSocket } from 'ws';
-import { readFileSync, existsSync } from 'fs';
-import { fileURLToPath } from 'url';
+import { existsSync, readFileSync } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { WebSocket, WebSocketServer } from 'ws';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VEHICLE_PORT = parseInt(process.env.VEHICLE_WS_PORT || '9003');
