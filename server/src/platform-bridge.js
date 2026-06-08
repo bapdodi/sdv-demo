@@ -54,6 +54,8 @@ export function startBridge(onVehicleUpdate) {
 
   wss.on('connection', (ws) => {
     let vin = null;
+    const remote = ws._socket ? `${ws._socket.remoteAddress}:${ws._socket.remotePort}` : 'unknown';
+    console.log(`[bridge] 연결 수신 from ${remote}`);
 
     ws.on('message', (raw) => {
       try {
@@ -88,8 +90,12 @@ export function startBridge(onVehicleUpdate) {
               ws,
             });
           }
-          console.log(`[bridge] ${vin} 자동 등록`);
-          if (onVehicleUpdate) onVehicleUpdate(getExternalSnapshot());
+          console.log(`[bridge] ${vin} 자동 등록 (from ${remote})`);
+          if (onVehicleUpdate) {
+            const snap = getExternalSnapshot();
+            console.log(`[bridge] onVehicleUpdate 호출 — ${snap.length} vehicles: ${snap.map(v=>v.vin).join(', ')}`);
+            onVehicleUpdate(snap);
+          }
           return;
         }
 
@@ -115,6 +121,12 @@ export function startBridge(onVehicleUpdate) {
             vehicle.brake = d.brake ?? 0;
             vehicle.steer = d.steer ?? 0;
           }
+          if (onVehicleUpdate) {
+            const snap = getExternalSnapshot();
+            console.log(`[bridge] ${vin} vehicle_state 처리 from ${remote} — pos:${vehicle.x},${vehicle.y} speed:${vehicle.speed}`);
+            console.log(`[bridge] onVehicleUpdate 호출 — ${snap.length} vehicles: ${snap.map(v=>v.vin).join(', ')}`);
+            onVehicleUpdate(snap);
+          }
         } else if (msg.type === 'location' && msg.data) {
           const d = parseData(msg.data);
           if (!d || d.x == null) { /* 텍스트 location 무시 */ return; }
@@ -136,9 +148,13 @@ export function startBridge(onVehicleUpdate) {
             const dx = vehicle.x - prevX, dy = vehicle.y - prevY;
             if (dx * dx + dy * dy > 0.01) vehicle.angle = Math.atan2(dy, dx);
           }
+          if (onVehicleUpdate) {
+            const snap = getExternalSnapshot();
+            console.log(`[bridge] ${vin} location 처리 from ${remote} — pos:${vehicle.x},${vehicle.y} speed:${vehicle.speed}`);
+            console.log(`[bridge] onVehicleUpdate 호출 — ${snap.length} vehicles: ${snap.map(v=>v.vin).join(', ')}`);
+            onVehicleUpdate(snap);
+          }
         }
-
-        if (onVehicleUpdate) onVehicleUpdate(getExternalSnapshot());
       } catch { /* ignore malformed */ }
     });
 
