@@ -71,10 +71,12 @@ export function startBridge(onVehicleUpdate) {
             v.x = 0; v.y = 0;
             v.hasPosition = false;
             v.displayPos = undefined;
+            if (msg.model) v.model = msg.model;
           } else {
             vehicles.set(vin, {
               vin,
               name: vin,          // 이름 = VIN 고정
+              model: msg.model || "",
               color: nextColor(), // 색상 = 자동 배정
               x: 0, y: 0,
               hasPosition: false, // 첫 location 수신 전까지 스냅샷에서 제외
@@ -164,6 +166,7 @@ export function getExternalSnapshot() {
     result.push({
       vin:       v.vin,
       name:      v.name,
+      model:     v.model || "",
       color:     v.color,
       x:         Math.round(v.x * 10) / 10,
       y:         Math.round(v.y * 10) / 10,
@@ -182,7 +185,7 @@ export function getExternalSnapshot() {
 /* ── 아웃바운드 연결 (DisplayFeature_v2 WS → 브릿지 클라이언트) ───── */
 // platforms.json 에 등록된 플랫폼의 DisplayFeature WS 에 브릿지가 직접 연결.
 // vehicle_state 메시지에 x,y,angle 이 포함된 경우 위치도 함께 갱신.
-function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
+function connectPlatformDisplayFeature({ vin, name, host, port, color, model }) {
   function tryConnect() {
     console.log(`[bridge] ${vin} DisplayFeature 접속 시도 (${host}:${port})`);
     const ws = new WebSocket(`ws://${host}:${port}`);
@@ -192,6 +195,7 @@ function connectPlatformDisplayFeature({ vin, name, host, port, color }) {
       if (!vehicles.has(vin)) {
         vehicles.set(vin, {
           vin, name: name || vin, color: color || nextColor(),
+          model: model || "",
           x: 0, y: 0, hasPosition: false,
           speed: 0, steer: 0, accel: 0, brake: 0, angle: 0,
           connected: true, lastSeen: Date.now(), isExternal: true,
